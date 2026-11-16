@@ -5,7 +5,8 @@ import { createClient } from '@supabase/supabase-js';
 import { randomUUID } from 'node:crypto';
 const enabled = process.env.MYDOCUMENTS_RUN_INTEGRATION === 'true';
 test('live database: atomic lockout, private storage, owner RLS, and idle expiry', { skip: !enabled }, async () => {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!; const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+  const url = (process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL)!;
+  const anonKey = (process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)!;
   const admin = createClient(url, process.env.SUPABASE_SERVICE_ROLE_KEY!, { auth: { persistSession:false } });
   const ids: string[] = []; const paths: string[] = [];
   const ok = (r: { error: unknown }) => assert.equal(r.error, null);

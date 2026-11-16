@@ -33,19 +33,31 @@ New encryption uses `mydocuments` context labels. The reader also accepts the or
 
 | Variable | Where to find it / purpose | Browser? |
 | --- | --- | --- |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL, e.g. `https://abc.supabase.co` | Public |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase legacy anon API key | Public, protected by RLS |
+| `SUPABASE_URL` | Supabase project URL, e.g. `https://abc.supabase.co` | Server only in this app |
+| `SUPABASE_ANON_KEY` | Supabase legacy anon API key | Server only in this app; permissions protected by RLS |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase legacy service-role key | **Server only** |
 | `APP_AUTH_SECRET` | Random 32-byte hex secret; derives opaque internal Auth passwords and anonymizes rate-limit keys | **Server only** |
 | `APP_ORIGIN` | Exact app origin, no trailing slash; `http://localhost:3000` locally, `https://mydocuments.example.com` in production | Server only |
 
 Use the anon/service-role pair from Supabase **Project Settings → API Keys → Legacy keys**. Do not put a service-role key in a `NEXT_PUBLIC_` variable. Back up `APP_AUTH_SECRET`: changing it requires rotating internal Auth passwords for existing accounts; otherwise they cannot sign in. Vercel sets `VERCEL` automatically. Rate limits trust only Vercel's overwritten `x-vercel-forwarded-for` header there; outside Vercel the application intentionally uses a shared rate-limit bucket until you configure a trusted proxy integration.
 
+All Supabase clients run in server API routes, so this app does not need `NEXT_PUBLIC_` environment variables. Existing `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` settings remain supported as fallbacks; the new server-only names take precedence. To remove Vercel's public-variable warning, rename those two variables to `SUPABASE_URL` and `SUPABASE_ANON_KEY`, keeping their values, then redeploy this version. The URL and anon key are designed to be public with RLS, so the warning alone does not mean a deployment failed. See [Supabase API keys](https://supabase.com/docs/guides/getting-started/api-keys).
+
 ## Deploy to Vercel
 
 1. Commit the `MyDocuments` directory and its lockfile to your Git repository. Do not commit environment files.
 2. Import the repository into Vercel. Set **Root Directory** to `MyDocuments` if it is a subdirectory, and select **Next.js**. Use Node 24.x, install command `npm ci`, build command `npm run build`. No static export; API routes need the Node runtime.
 3. Add all five environment variables to the intended Vercel environment. Set `APP_ORIGIN` to the exact production HTTPS hostname. Use a separate Supabase project for preview/staging; each preview needs its own matching origin. Redeploy after changing environment variables.
+
+   ```dotenv
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_ANON_KEY=your-anon-key
+   SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+   APP_AUTH_SECRET=your-existing-64-character-hex-secret
+   APP_ORIGIN=https://your-app.vercel.app
+   ```
+
+   Replace the placeholders with your existing values and actual deployment domain. Keep `APP_AUTH_SECRET` unchanged when deploying an existing installation. `APP_ORIGIN` must have no path or trailing slash; do not copy the localhost value to production. See [Vercel environment variables](https://vercel.com/docs/environment-variables).
 4. Deploy. Vercel supplies HTTPS and redirects HTTP. If you add a custom domain, update `APP_ORIGIN` and redeploy. Direct production traffic to one canonical hostname; mutations from other origins are rejected.
 5. Run the live checks below against staging, then smoke-test production: signup, failed PIN attempts, upload, preview/download, rename/delete, recovery, inactivity lock, and logout. The app is prepared for deployment; no Vercel or Supabase account was provisioned by this repository.
 6. On iPhone use Safari **Share → Add to Home Screen**; on Android use Chrome's **Install app**. The PWA runs standalone and supports system dark mode. Internet is required to unlock and access documents; offline navigation shows a neutral offline page.
@@ -103,7 +115,7 @@ MyDocuments/
 - PBKDF2-HMAC-SHA-256, 600,000 iterations, and a random 128-bit salt derive a PIN wrapping key. The encrypted key envelope is versioned. Only ciphertext, salts, IVs, opaque IDs, byte lengths, and creation timestamps reach persistent storage. Keys and plaintext live in browser memory; nothing sensitive is written to localStorage, IndexedDB, or service-worker caches. Best-effort wiping of raw key bytes does not guarantee JavaScript memory erasure.
 - **A six-digit PIN has only one million possibilities.** Client encryption limits casual/server-at-rest access, but a database attacker can attempt offline PIN guessing without the online rate limit. A saved recovery key prevents loss; it **does not strengthen a weak PIN wrapper**. For higher-assurance use, extend the design to require a strong password/passkey-assisted key derivation as well as the PIN before putting irreplaceable identity documents in it.
 - The optional recovery key is a random 256-bit secret. It independently wraps the same document key, and its bcrypt hash is stored for online verification. Recovery logs in with that secret, unwraps the key in-browser, and prompts for a new PIN. Replacing a recovery key invalidates the previous one. There is no email recovery or administrative decryption. **Losing the PIN and recovery key loses access to the documents.**
-- The application server receives PINs during login, so a malicious server/runtime could observe them or serve altered JavaScript. This implementation provides client encryption at rest, **not a zero-knowledge guarantee against an actively malicious server**. An independent security review is needed before a sensitive production rollout.
+- The application server receives PINs during login, so a malicious server/runtime could observe them or serve altered JavaScript. This implementation provides client encryption at rest, **not a zero-knowledge guarantee against an actively malicious server**. An independent security review is needed before a sensitive production rollout..
 
 ### File handling and signed URLs
 

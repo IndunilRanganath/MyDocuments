@@ -3,10 +3,13 @@ import { cookies } from 'next/headers';
 import { createHmac } from 'node:crypto';
 import { z } from 'zod';
 export class HttpError extends Error { constructor(public status: number, message: string) { super(message); } }
-export function configured() { return Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL && process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY && process.env.SUPABASE_SERVICE_ROLE_KEY && /^[a-f0-9]{64}$/i.test(process.env.APP_AUTH_SECRET || '') && process.env.APP_ORIGIN); }
+// Supabase clients run on the server. Keep the old public names as deployment fallbacks.
+const supabaseUrl = () => process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supabaseAnonKey = () => process.env.SUPABASE_ANON_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+export function configured() { return Boolean(supabaseUrl() && supabaseAnonKey() && process.env.SUPABASE_SERVICE_ROLE_KEY && /^[a-f0-9]{64}$/i.test(process.env.APP_AUTH_SECRET || '') && process.env.APP_ORIGIN); }
 export function client(admin = false) {
   if (!configured()) throw new HttpError(503, 'Connect Supabase to open your documents. See README.');
-  return createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, admin ? process.env.SUPABASE_SERVICE_ROLE_KEY! : process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+  return createClient(supabaseUrl()!, admin ? process.env.SUPABASE_SERVICE_ROLE_KEY! : supabaseAnonKey()!, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
 }
 export function check(error: { message: string } | null) { if (error) { console.error('MyDocuments backend operation failed:', error.message); throw new HttpError(500, 'Could not complete this action. Please try again.'); } }
 export function digest(value: string) { return createHmac('sha256', process.env.APP_AUTH_SECRET!).update(value).digest('hex'); }

@@ -120,6 +120,8 @@ MyDocuments/
 ### File handling and signed URLs
 
 - Only JPG, PNG, and PDF up to 10 MiB (10,485,760 bytes) are accepted. The client checks magic bytes and declared MIME before encryption. The encrypted payload is exactly 28 bytes larger (12-byte IV + 16-byte authentication tag). The server validates ciphertext bounds and metadata-envelope shape, creates the upload intent, then verifies the actual stored size before listing the document. The private bucket independently limits MIME to `application/octet-stream` and size to 10 MiB + 28 bytes.
+- Adding a document requires a name, type, and file. New documents have no expiry date. Existing documents retain their saved expiry metadata and badges.
+- PDF previews use a locally bundled PDF.js worker to render pages in the browser, with previous/next controls. Image and PDF failures show a retry action while keeping the original download available. Leaving a preview cancels its download and ignores stale responses.
 - A server cannot verify the original file type while remaining unable to decrypt it. A modified client could upload arbitrary encrypted bytes to its own document collection. The original-file checks are client-side, not a malware scanner or a server-side plaintext inspection. Originals are never served from the app's origin; previews use browser blob URLs.
 - Signed download URLs expire after 15 seconds and return encrypted bytes; the browser decrypts the response. An issued URL remains usable until expiry even after logout. Signed upload URLs are Supabase-scoped capabilities (normally valid for two hours), restricted to a preauthorized user/document path, with no overwrite policy. They may finish an encrypted upload after lock but cannot unlock, read, or finalize documents without a new authenticated session. Treat both URL types as secrets; do not log them.
 - `ready=false` upload intents stay hidden. Failed uploads attempt cleanup; a browser crash can leave an orphan. For production, schedule a server maintenance job to remove Storage objects for upload intents older than a day, then delete those rows. Also prune expired `mydocuments_sessions` and expired `mydocuments_private.rate_limits` through a database maintenance job. Delete Storage objects through its API, not direct SQL on `storage.objects`.
@@ -156,9 +158,9 @@ That test checks concurrent five-attempt lockout, cross-user metadata/Storage de
 Manual acceptance:
 
 1. At 375px and desktop widths, create two accounts, upload JPG/PNG/PDF, choose the camera on a phone, rename and download each, then delete one.
-2. Use an expiry of today, +90 days, +91 days, and yesterday; check the badges and filter.
+2. Add documents without an expiry date. For existing documents with expiry metadata, check the badges and filter.
 3. Fail a PIN five times; confirm correct PIN and recovery key cannot log in for 15 minutes. Confirm another account remains usable.
 4. Leave MyDocuments untouched for two minutes and suspend/resume its tab; confirm content clears and data API calls are rejected. Logout, then use browser Back.
 5. Create/save a recovery key, log out, recover, reset PIN, and unlock the existing files with the new PIN. Check the old PIN and all prior app sessions fail. Replace the key and check the old recovery key fails.
 6. In browser storage tools, confirm no plaintext, keys, document metadata, or Auth tokens are in localStorage/IndexedDB/cache storage. Inspect httpOnly/Secure/SameSite cookie flags in production.
-7. Test iOS/Android standalone installation, dark mode, keyboard navigation, and a screen reader. Check PDFs on the actual target devices; mobile PDF viewers may offer Download instead of a multipage inline view.
+7. Test iOS/Android standalone installation, dark mode, keyboard navigation, and a screen reader. Check PDF page navigation and downloads on the actual target devices. Corrupt or password-protected PDFs should show a retry message with the original download available.

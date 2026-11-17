@@ -4,9 +4,13 @@ import { ArrowDownToLine, ArrowLeft, ArrowRight, Check, ChevronRight, FileText, 
 import { api } from '@/lib/api';
 import { base64, daysUntil, decrypt, decryptMeta, encrypt, encryptMeta, importMyDocumentsKey, newMyDocumentsKey, recoverySecret, unwrapKey, validateFile, wrapKey, type DocType, type Envelope, type Metadata } from '@/lib/crypto';
 import { PinPad } from './pin-pad';
+import { DocumentPreview } from './document-preview';
 type Row = { id: string; encrypted_meta: string; created_at: string };
 type Document = Row & { meta: Metadata };
-type AuthResult = { pin_envelope: Envelope; recovery_envelope: Envelope | null; username: string };
+type AuthResult = { pin_envelope: Envelope; recovery_envelope: Envelope | null; username: string; documents: Row[] };
+async function decryptDocuments(documentsKey: CryptoKey, rows: Row[]): Promise<Document[]> {
+  return Promise.all(rows.map(async row => ({ ...row, meta: await decryptMeta(documentsKey, row.encrypted_meta, row.id) })));
+}
 const types: DocType[] = ['Passport', 'ID', 'Visa', 'Other'];
 const icons = { Passport: Globe2, ID: IdCard, Visa: ScanLine, Other: FileText };
 function DocIcon({ type, size = 26 }: { type: DocType; size?: number }) { const Icon = icons[type] || FileText; return <Icon size={size} strokeWidth={1.4}/>; }
@@ -20,11 +24,17 @@ export default function MyDocuments() {
   const [docs, setDocs] = useState<Document[]>([]); const [filter, setFilter] = useState('All'); const [onlyExpiring, setOnlyExpiring] = useState(false);
   const [screen, setScreen] = useState<'home' | 'add' | 'view' | 'settings' | 'reset'>('home'); const [menu, setMenu] = useState(false);
   const [selected, setSelected] = useState<Document | null>(null); const [preview, setPreview] = useState(''); const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewData, setPreviewData] = useState<ArrayBuffer | null>(null);
+  const previewRequest = useRef(0); const previewAbort = useRef<AbortController | null>(null);
   const [rename, setRename] = useState(false); const [newName, setNewName] = useState(''); const [confirmDelete, setConfirmDelete] = useState(false);
   const [savedRecovery, setSavedRecovery] = useState(''); const [hasRecovery, setHasRecovery] = useState(false);
   const key = useRef<CryptoKey | null>(null); const rawKey = useRef<Uint8Array<ArrayBuffer> | null>(null); const epoch = useRef(0); const previewUrl = useRef('');
   const lastActivity = useRef(Date.now()); const lastHeartbeat = useRef(Date.now()); const heartbeatPending = useRef(false);
-  const clearPreview = useCallback(() => { if (previewUrl.current) URL.revokeObjectURL(previewUrl.current); previewUrl.current = ''; setPreview(''); }, []);
+  const clearPreview = useCallback(() => {
+    previewRequest.current++; previewAbort.current?.abort(); previewAbort.current = null;
+    if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
+    previewUrl.current = ''; setPreview(''); setPreviewData(null); setPreviewLoading(false);
+  }, []);
   const lock = useCallback((message = 'MyDocuments locked') => {
     epoch.current++; rawKey.current?.fill(0); rawKey.current = null; key.current = null; clearPreview();
     setUnlocked(false); setDocs([]); setSelected(null); setPin(''); setFirstPin(''); setRecovery(''); setSavedRecovery(''); setScreen('home'); setMenu(false); setError(''); setBusy(false); setNotice(message); setRename(false); setConfirmDelete(false); setMode('login');
@@ -34,7 +44,7 @@ export default function MyDocuments() {
     void api<{ configured: boolean }>('health').then(d => setConfigured(d.configured)).catch(() => setConfigured(false));
     if ('serviceWorker' in navigator) void navigator.serviceWorker.register('/sw.js').catch(() => {});
     const locked = () => lock('Session ended. Unlock to continue.'); window.addEventListener('mydocuments:locked', locked);
-    return () => { window.removeEventListener('mydocuments:locked', locked); if (previewUrl.current) URL.revokeObjectURL(previewUrl.current); };
+    return () => { window.removeEventListener('mydocuments:locked', locked); previewRequest.current++; previewAbort.current?.abort(); if (previewUrl.current) URL.revokeObjectURL(previewUrl.current); };
   }, [lock]);
   useEffect(() => {
     if (!unlocked) return;
@@ -73,7 +83,7 @@ export default function MyDocuments() {
   }, [rename, confirmDelete, busy]);
   async function loadDocuments(documentsKey: CryptoKey, version: number) {
     const result = await api<{ documents: Row[] }>('documents');
-    const decrypted = await Promise.all(result.documents.map(async row => ({ ...row, meta: await decryptMeta(documentsKey, row.encrypted_meta, row.id) })));
+    const decrypted = await decryptDocuments(documentsKey, result.documents);
     if (epoch.current === version) setDocs(decrypted);
   }
   async function authenticate(e: FormEvent) {
@@ -88,23 +98,31 @@ export default function MyDocuments() {
       if (mode === 'signup') { raw = await newMyDocumentsKey(); const envelope = await wrapKey(raw, pin); result = await api<AuthResult>('auth/signup', { username, pin, confirmPin: firstPin, envelope }); }
       else { result = await api<AuthResult>(mode === 'recover' ? 'auth/recover' : 'auth/login', { username, secret: mode === 'recover' ? recovery.trim().toLowerCase() : pin }); const envelope = mode === 'recover' ? result.recovery_envelope : result.pin_envelope; if (!envelope) throw new Error('No recovery key is set up.'); raw = await unwrapKey(envelope, mode === 'recover' ? recovery.trim().toLowerCase() : pin); }
       if (epoch.current !== version) { raw.fill(0); return; }
-      rawKey.current = raw; key.current = await importMyDocumentsKey(raw); setUsername(result.username); setHasRecovery(Boolean(result.recovery_envelope));
+      const documentsKey = await importMyDocumentsKey(raw);
+      let decrypted: Document[];
+      try { decrypted = await decryptDocuments(documentsKey, result.documents); }
+      catch (error) { raw.fill(0); throw error; }
+      if (epoch.current !== version) { raw.fill(0); return; }
+      rawKey.current = raw; key.current = documentsKey; setDocs(decrypted); setFilter('All'); setOnlyExpiring(false); setUsername(result.username); setHasRecovery(Boolean(result.recovery_envelope));
       setPin(''); setFirstPin(''); setRecovery(''); setUnlocked(true); setScreen(mode === 'recover' ? 'reset' : 'home');
-      await loadDocuments(key.current, version);
     } catch (err) { if (epoch.current === version) { setError(err instanceof Error ? err.message : 'Could not unlock.'); if (!key.current) void api('auth/logout', {}).catch(() => {}); } }
     finally { if (epoch.current === version) setBusy(false); }
   }
   function switchMode(next: typeof mode) { setMode(next); setPin(''); setFirstPin(''); setRecovery(''); setError(''); setNotice(''); }
   async function openDocument(doc: Document) {
     clearPreview(); setSelected(doc); setScreen('view'); setPreviewLoading(true); setError(''); const version = epoch.current; const documentsKey = key.current!;
+    const request = previewRequest.current; const controller = new AbortController(); previewAbort.current = controller;
+    const isCurrent = () => epoch.current === version && previewRequest.current === request && !controller.signal.aborted;
     try {
-      const { url } = await api<{ url: string }>(`documents/${doc.id}`); const response = await fetch(url, { cache: 'no-store', referrerPolicy: 'no-referrer' });
+      const { url } = await api<{ url: string }>(`documents/${doc.id}`);
+      if (!isCurrent()) return;
+      const response = await fetch(url, { cache: 'no-store', referrerPolicy: 'no-referrer', signal: controller.signal });
       if (!response.ok) throw new Error('Could not download document.');
       const plain = await decrypt(documentsKey, new Uint8Array(await response.arrayBuffer()), `mydocuments:file:${doc.id}`);
-      if (epoch.current !== version) return;
-      const blobUrl = URL.createObjectURL(new Blob([plain], { type: doc.meta.mime })); previewUrl.current = blobUrl; setPreview(blobUrl);
-    } catch (err) { if (epoch.current === version) setError(err instanceof Error ? err.message : 'Could not open document.'); }
-    finally { if (epoch.current === version) setPreviewLoading(false); }
+      if (!isCurrent()) return;
+      const blobUrl = URL.createObjectURL(new Blob([plain], { type: doc.meta.mime })); previewUrl.current = blobUrl; setPreview(blobUrl); setPreviewData(plain);
+    } catch (err) { if (isCurrent()) setError(err instanceof Error ? err.message : 'Could not open document.'); }
+    finally { if (isCurrent()) { setPreviewLoading(false); previewAbort.current = null; } }
   }
   async function renameDocument(e: FormEvent) {
     e.preventDefault(); if (!selected || !key.current) return; setBusy(true); setError(''); const version = epoch.current;
@@ -153,7 +171,7 @@ export default function MyDocuments() {
     </> : screen === 'add' ? <AddDocument documentsKey={key.current!} version={epoch.current} isCurrent={v => epoch.current === v} onBack={() => setScreen('home')} onAdded={async () => { await loadDocuments(key.current!, epoch.current); setScreen('home'); }}/>
     : screen === 'view' && selected ? <>
       <header className="page-header"><button className="icon-button" aria-label="Back to documents" onClick={() => { clearPreview(); setSelected(null); setScreen('home'); setError(''); }}><ArrowLeft size={22}/></button><div><h1>{selected.meta.name}</h1><span>{selected.meta.type}</span></div><span className="icon-button decorative"><LockKeyhole size={18}/></span></header>
-      <div className="preview-area">{previewLoading ? <Spinner/> : preview ? selected.meta.mime === 'application/pdf' ? <iframe src={preview} title={selected.meta.name} className="pdf-preview"/> : <img src={preview} alt={selected.meta.name} className="image-preview"/> : <div className="preview-error"><FileText size={40}/><p>Preview unavailable</p><button className="text-button" onClick={() => void openDocument(selected)}>Try again</button></div>}</div>
+      <div className="preview-area">{previewLoading ? <Spinner/> : preview && previewData ? <DocumentPreview key={preview} url={preview} data={previewData} mime={selected.meta.mime} name={selected.meta.name} onRetry={() => void openDocument(selected)}/> : <div className="preview-error"><FileText size={40}/><p>Preview unavailable</p><button className="text-button" onClick={() => void openDocument(selected)}>Try again</button></div>}</div>
       {selected.meta.expiry && <p className="preview-expiry"><CalendarDays size={14}/>Expires {new Date(selected.meta.expiry + 'T00:00:00').toLocaleDateString(undefined, { day:'numeric', month:'short', year:'numeric' })}</p>}
       {error && <p className="error" role="alert">{error}</p>}
       <div className="viewer-actions"><a className={`action-tile ${!preview ? 'disabled' : ''}`} href={preview || undefined} download={selected.meta.filename} aria-disabled={!preview} onClick={e => { if (!preview) e.preventDefault(); }}><ArrowDownToLine size={21}/><span>Download</span></a><button className="action-tile" onClick={() => { setNewName(selected.meta.name); setRename(true); }}><Pencil size={20}/><span>Rename</span></button><button className="action-tile danger" onClick={() => setConfirmDelete(true)}><Trash2 size={20}/><span>Delete</span></button></div>
@@ -173,14 +191,14 @@ export default function MyDocuments() {
 function PageHeader({ title, onBack }: { title: string; onBack: () => void }) { return <header className="page-header"><button className="icon-button" aria-label="Back" onClick={onBack}><ArrowLeft size={22}/></button><h1>{title}</h1><span className="header-spacer"/></header>; }
 function downloadText(text: string, filename: string) { const url = URL.createObjectURL(new Blob([text + '\n'], { type:'text/plain' })); const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); setTimeout(() => URL.revokeObjectURL(url),1000); }
 function AddDocument({ documentsKey, version, isCurrent, onBack, onAdded }: { documentsKey: CryptoKey; version: number; isCurrent: (v: number) => boolean; onBack: () => void; onAdded: () => Promise<void> }) {
-  const [type, setType] = useState<DocType>('Passport'); const [name, setName] = useState(''); const [expiry, setExpiry] = useState(''); const [file, setFile] = useState<File | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [status, setStatus] = useState('');
+  const [type, setType] = useState<DocType>('Passport'); const [name, setName] = useState(''); const [file, setFile] = useState<File | null>(null); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [status, setStatus] = useState('');
   const upload = useRef<HTMLInputElement>(null); const camera = useRef<HTMLInputElement>(null);
   async function choose(file: File | undefined) { if (!file) return; try { await validateFile(file); setFile(file); setError(''); } catch (err) { setError((err as Error).message); } }
   async function save(e: FormEvent) {
     e.preventDefault(); if (!file) return; setBusy(true); setError(''); let id = ''; let intent = false; let complete = false;
     try {
       const mime = await validateFile(file); id = crypto.randomUUID(); setStatus('Encrypting…');
-      const meta: Metadata = { name: name.trim(), type, expiry, filename: file.name, mime };
+      const meta: Metadata = { name: name.trim(), type, expiry: '', filename: file.name, mime };
       const [bytes, encrypted_meta] = await Promise.all([encrypt(documentsKey, await file.arrayBuffer(), `mydocuments:file:${id}`), encryptMeta(documentsKey, meta, id)]);
       if (!isCurrent(version)) return;
       const { signedUrl } = await api<{ signedUrl: string }>('documents/upload', { id, encrypted_meta, ciphertext_size: bytes.length }); intent = true; setStatus('Saving…');
@@ -196,7 +214,6 @@ function AddDocument({ documentsKey, version, isCurrent, onBack, onAdded }: { do
   return <><PageHeader title="Add document" onBack={onBack}/><form className="add-form" onSubmit={save}>
     <label className="field-label">Document type</label><div className="type-picker">{types.map(t => <button type="button" key={t} aria-pressed={type === t} disabled={busy} className={type === t ? 'active' : ''} onClick={() => setType(t)}><DocIcon type={t} size={24}/><span>{t}</span></button>)}</div>
     <label className="stack-field">Name<input className="text-input" placeholder="e.g. My passport" value={name} onChange={e => setName(e.target.value)} maxLength={80} required disabled={busy}/></label>
-    <label className="stack-field">Expiry date <span className="optional">Optional</span><input className="text-input" type="date" value={expiry} onChange={e => setExpiry(e.target.value)} min="1900-01-01" max="2200-12-31" disabled={busy}/></label>
     <label className="field-label">Document file</label><input ref={upload} type="file" accept="image/jpeg,image/png,application/pdf,.jpg,.jpeg,.png,.pdf" className="sr-only" aria-label="Choose document file" onChange={e => { void choose(e.target.files?.[0]); e.target.value=''; }}/><input ref={camera} type="file" accept="image/jpeg,image/png" capture="environment" className="sr-only" aria-label="Take a document photo" onChange={e => { void choose(e.target.files?.[0]); e.target.value=''; }}/>
     <button className={`upload-zone ${file ? 'has-file' : ''}`} type="button" onClick={() => upload.current?.click()} disabled={busy}><span className="upload-icon">{file ? <Check size={24}/> : <Upload size={24} strokeWidth={1.5}/>}</span><strong>{file ? file.name : 'Choose a file'}</strong><span>{file ? `${(file.size/1024/1024).toFixed(1)} MB · Tap to replace` : 'JPG, PNG or PDF · Up to 10 MB'}</span></button>
     <button className="button camera-button" type="button" onClick={() => camera.current?.click()} disabled={busy}><Camera size={19} strokeWidth={1.5}/>Take a photo</button>

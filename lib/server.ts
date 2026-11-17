@@ -72,6 +72,15 @@ export async function rate(request: Request, scope: string, limit = 30, seconds 
   if (!data) throw new HttpError(429, 'Too many attempts. Try again in 15 minutes.');
 }
 export async function keys(sb: SupabaseClient, id: string) { const { data, error } = await sb.from('mydocuments_keys').select('pin_envelope,recovery_envelope').eq('user_id', id).single(); check(error); return data; }
+export async function documents(sb: SupabaseClient) {
+  const { data, error } = await sb.from('documents').select('id,encrypted_meta,created_at').eq('ready', true).order('created_at', { ascending: false });
+  check(error); return data ?? [];
+}
+export async function unlockData(sb: SupabaseClient, id: string) {
+  // Both reads use the new user's session and RLS, after session registration.
+  const [envelopes, rows] = await Promise.all([keys(sb, id), documents(sb)]);
+  return { ...envelopes, documents: rows };
+}
 export const username = z.string().trim().toLowerCase().min(3).max(120).regex(/^[a-z0-9][a-z0-9_.@+\-]*$/, 'Use letters, numbers, or an email.');
 export const pin = z.string().regex(/^\d{6}$/, 'Enter a six-digit PIN.');
 export const envelope = z.object({ v: z.literal(1), salt: z.string().regex(/^[A-Za-z0-9+/]{22}==$/), iv: z.string().regex(/^[A-Za-z0-9+/]{16}$/), data: z.string().regex(/^[A-Za-z0-9+/]{64}$/) }).strict();

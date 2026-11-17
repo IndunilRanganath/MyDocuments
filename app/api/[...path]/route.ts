@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { authenticated, check, clearCookies, client, configured, envelope, guard, HttpError, issueSession, keys, pin, rate, readBody, username, authPassword } from '@/lib/server';
+import { authenticated, check, clearCookies, client, configured, documents, envelope, guard, HttpError, issueSession, keys, pin, rate, readBody, username, authPassword, unlockData } from '@/lib/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 const json = (data: unknown, status = 200) => NextResponse.json(data, { status, headers: { 'Cache-Control': 'no-store, private', 'Pragma': 'no-cache' } });
@@ -20,7 +20,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
       const { error } = await admin.auth.admin.createUser({ id, email: `${id}@mydocuments.invalid`, password: authPassword(id), email_confirm: true }); check(error);
       const result = await admin.rpc('mydocuments_register', { p_id: id, p_username: b.username, p_pin: b.pin, p_envelope: b.envelope });
       if (result.error) { await admin.auth.admin.deleteUser(id); throw new HttpError(409, 'Account could not be created. Try another username.'); }
-      const sb = await issueSession(id); return json({ ...(await keys(sb, id)), username: b.username }, 201);
+      const sb = await issueSession(id); return json({ ...(await keys(sb, id)), documents: [], username: b.username }, 201);
     }
     if ((action === 'auth/login' || action === 'auth/recover') && method === 'POST') {
       await rate(request, 'login');
@@ -28,7 +28,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
       const b = z.object({ username, secret: isRecovery ? recovery : pin }).parse(await readBody(request));
       const { data: id, error } = await client(true).rpc('mydocuments_verify', { p_username: b.username, p_secret: b.secret, p_recovery: isRecovery }); check(error);
       if (!id) throw new HttpError(400, 'Details incorrect or account locked. After 5 attempts, wait 15 minutes.');
-      const sb = await issueSession(id); return json({ ...(await keys(sb, id)), username: b.username });
+      const sb = await issueSession(id); return json({ ...(await unlockData(sb, id)), username: b.username });
     }
     if (action === 'auth/logout' && method === 'POST') {
       try { const { sb, sid } = await authenticated(); check((await client(true).from('mydocuments_sessions').delete().eq('id', sid)).error); await sb.auth.signOut({ scope: 'local' }); }
@@ -50,7 +50,7 @@ async function handle(request: Request, context: { params: Promise<{ path: strin
       await clearCookies(); return json({ ok: true });
     }
     if (action === 'documents' && method === 'GET') {
-      const { data, error } = await sb.from('documents').select('id,encrypted_meta,created_at').eq('ready', true).order('created_at', { ascending: false }); check(error); return json({ documents: data });
+      return json({ documents: await documents(sb) });
     }
     if (action === 'documents/upload' && method === 'POST') {
       const b = z.object({ id: z.uuid(), encrypted_meta: meta, ciphertext_size: z.number().int().min(29).max(10485788) }).parse(await readBody(request));
